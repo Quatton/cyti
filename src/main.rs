@@ -1,8 +1,9 @@
-use bevy::{gltf::Gltf, prelude::*, scene::ron::de};
+use bevy::{gltf::Gltf, prelude::*};
 use bevy_asset_loader::prelude::*;
 use bevy_atmosphere::prelude::*;
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
-use bevy_rapier3d::{prelude::*, rapier::geometry::InteractionGroups};
+use bevy_rapier3d::prelude::*;
+use rand::prelude::*;
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash, Default, States)]
 enum AssetLoaderState {
@@ -18,31 +19,25 @@ struct MyAssets {
 }
 
 #[derive(Component)]
-struct Following {
-    facing: Vec3,
-}
-
-#[derive(Component)]
 struct CanMove {
     speed: f32,
+    turn_speed: f32,
 }
+
+const RADIUS: f32 = 25.0;
+const CAR_BASE_SPEED: f32 = 15.0;
 
 impl Default for CanMove {
     fn default() -> Self {
-        Self { speed: 5.0 }
+        Self {
+            speed: 15.0,
+            turn_speed: -1.0,
+        }
     }
 }
 
 #[derive(Component)]
 struct CanDie;
-
-impl Default for Following {
-    fn default() -> Self {
-        Self {
-            facing: Vec3::new(0.0, 0.0, 1.0),
-        }
-    }
-}
 
 fn main() {
     App::new()
@@ -111,22 +106,37 @@ fn spawn_car_on_c(
     assets: Res<AssetServer>,
 ) {
     if keyboard_input.just_pressed(KeyCode::KeyC) {
-        spawn_car(commands, assets);
+        let mut rand = rand::thread_rng();
+
+        let random_angle = rand.gen_range(0.0..std::f32::consts::PI * 2.0);
+
+        let pos = Vec3::new(
+            RADIUS * random_angle.cos(),
+            0.0,
+            RADIUS * random_angle.sin(),
+        );
+
+        let rot = Quat::from_rotation_y(-random_angle);
+
+        spawn_car(commands, assets, pos, rot);
     }
 }
 
-fn spawn_car(mut commands: Commands, assets: Res<AssetServer>) {
+fn spawn_car(mut commands: Commands, assets: Res<AssetServer>, pos: Vec3, rot: Quat) {
     commands
         .spawn((
             SceneBundle {
                 scene: assets.load("cars/taxi.glb#Scene0"),
-                transform: Transform::from_xyz(0.0, 3.0, -25.0),
+                transform: Transform {
+                    translation: pos,
+                    rotation: rot,
+                    ..default()
+                },
                 ..default()
             },
             CanMove::default(),
             RigidBody::Dynamic,
             CanDie,
-            Following::default(),
         ))
         .with_children(|p| {
             p.spawn((
@@ -141,7 +151,7 @@ fn spawn_car(mut commands: Commands, assets: Res<AssetServer>) {
             ));
 
             p.spawn((
-                Collider::cone(3.0, 2.0),
+                Collider::cone(3.0, 5.0),
                 // rotate the cone so it's facing the same direction as the car
                 Transform::from_xyz(0.0, 0.5, 5.0)
                     .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
@@ -166,6 +176,7 @@ fn move_car(mut query: Query<(&CanMove, &mut Transform)>, time: Res<Time>) {
     for (v, mut transform) in query.iter_mut() {
         let rot = transform.rotation;
         transform.translation += rot * Vec3::Z * v.speed * time.delta_seconds();
+        transform.rotation = rot * Quat::from_rotation_y(v.turn_speed * time.delta_seconds());
     }
 }
 
@@ -197,6 +208,7 @@ fn detect_car_collision(
 
                 if let Ok(mut car) = car {
                     car.speed = 0.0;
+                    car.turn_speed = 1.0;
                 }
             }
             _ => {
@@ -217,11 +229,11 @@ fn detect_car_collision(
 }
 
 fn if_detect_nothing_go_forward(
-    mut car_query: Query<(Entity, &mut CanMove, &Children)>,
+    mut car_query: Query<(&mut CanMove, &Children)>,
     sensor_query: Query<Entity, With<Sensor>>,
     rapier_context: Res<RapierContext>,
 ) {
-    for (e, mut car, children) in car_query.iter_mut() {
+    for (mut car, children) in car_query.iter_mut() {
         if car.speed > 0.0 {
             continue;
         }
@@ -238,7 +250,8 @@ fn if_detect_nothing_go_forward(
             continue;
         }
 
-        car.speed = 5.0;
+        car.speed = 15.0;
+        car.turn_speed = -1.0;
     }
 }
 
