@@ -1,8 +1,8 @@
-use bevy::{gltf::Gltf, prelude::*};
+use bevy::{gltf::Gltf, prelude::*, transform};
 use bevy_asset_loader::prelude::*;
 use bevy_atmosphere::prelude::*;
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
-use bevy_rapier3d::prelude::*;
+use bevy_rapier3d::{na::base, prelude::*};
 use rand::prelude::*;
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash, Default, States)]
@@ -18,23 +18,25 @@ struct DecisionTimer(Timer);
 #[derive(AssetCollection, Resource)]
 struct MyAssets {
     #[asset(path = "cars/taxi.glb")]
+    #[allow(dead_code)]
     pub taxi: Handle<Gltf>,
 }
 
 #[derive(Component)]
 struct CanMove {
-    speed: f32,
-    turn_speed: f32,
+    base_speed: f32,
+    base_turn_speed: f32,
+    brake: bool,
 }
 
 const RADIUS: f32 = 25.0;
-const CAR_BASE_SPEED: f32 = 15.0;
 
 impl Default for CanMove {
     fn default() -> Self {
         Self {
-            speed: 15.0,
-            turn_speed: -1.0,
+            base_speed: 15.0,
+            base_turn_speed: 0.0,
+            brake: false,
         }
     }
 }
@@ -57,7 +59,7 @@ fn main() {
         .add_plugins(RapierDebugRenderPlugin::default())
         .add_plugins(PanOrbitCameraPlugin)
         .insert_resource(DecisionTimer(Timer::from_seconds(
-            1.0,
+            3.0,
             TimerMode::Repeating,
         )))
         .add_systems(
@@ -94,12 +96,22 @@ fn setup(
         .with_children(|parent| {
             parent.spawn((
                 Collider::cylinder(5.0, 30.0),
+                Friction::coefficient(0.5),
                 Transform::from_xyz(0.0, -5.0, 0.0),
                 CollisionGroups::new(
                     Group::from_bits(0b0100).unwrap(),
                     Group::from_bits(0b0001).unwrap(),
                 ),
             ));
+
+            // parent.spawn((
+            //     Collider::cylinder(5.0, 30.0),
+            //     ColliderMassProperties::Mass(0.0),
+            //     CollisionGroups::new(
+            //         Group::from_bits(0b1000).unwrap(),
+            //         Group::from_bits(0b0010).unwrap(),
+            //     ),
+            // ));
         });
 
     commands.spawn((
@@ -123,9 +135,9 @@ fn spawn_car_on_c(
         let random_angle = rand.gen_range(0.0..std::f32::consts::PI * 2.0);
 
         let pos = Vec3::new(
-            RADIUS * random_angle.cos(),
+            RADIUS * random_angle.cos() / 2.0,
             0.0,
-            RADIUS * random_angle.sin(),
+            RADIUS * random_angle.sin() / 2.0,
         );
 
         let rot = Quat::from_rotation_y(-random_angle);
@@ -149,13 +161,15 @@ fn spawn_car(mut commands: Commands, assets: Res<AssetServer>, pos: Vec3, rot: Q
             CanMove::default(),
             RigidBody::Dynamic,
             CanDie,
+            Velocity::default(),
+            ExternalForce::default(),
         ))
         .with_children(|p| {
             p.spawn((
                 Collider::cuboid(0.5, 0.5, 1.0),
                 Transform::from_xyz(0.0, 0.5, 0.0),
                 Restitution::coefficient(0.2),
-                ColliderMassProperties::Density(0.5),
+                ColliderMassProperties::Density(1.0),
                 CollisionGroups::new(
                     Group::from_bits(0b0001).unwrap(),
                     Group::from_bits(0b0111).unwrap(),
@@ -163,9 +177,9 @@ fn spawn_car(mut commands: Commands, assets: Res<AssetServer>, pos: Vec3, rot: Q
             ));
 
             p.spawn((
-                Collider::cone(3.0, 5.0),
+                Collider::cone(5.0, 1.0),
                 // rotate the cone so it's facing the same direction as the car
-                Transform::from_xyz(0.0, 0.5, 5.0)
+                Transform::from_xyz(0.0, 0.5, 6.5)
                     .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
                 Sensor,
                 ColliderMassProperties::Mass(0.0),
@@ -184,16 +198,44 @@ fn spawn_car(mut commands: Commands, assets: Res<AssetServer>, pos: Vec3, rot: Q
         });
 }
 
-fn move_car(mut query: Query<(&mut CanMove, &mut Transform)>, time: Res<Time>) {
-    for (mut v, mut transform) in query.iter_mut() {
+fn move_car(
+    mut query: Query<(&mut CanMove, &Transform, &Velocity, &mut ExternalForce)>,
+    _time: Res<Time>,
+) {
+    for (mut cm, transform, vel, mut fce) in query.iter_mut() {
         let rot = transform.rotation;
-        let planned_pos = transform.translation + rot * Vec3::Z * v.speed * time.delta_seconds();
-        if planned_pos.distance(Vec3::ZERO) < RADIUS {
-            transform.translation = planned_pos;
-        } else {
-            v.turn_speed = 5.0;
+        let direction = rot.mul_vec3(Vec3::Z).reject_from_normalized(Vec3::Y);
+        let acc_dir = vel.linvel.normalize().reject_from_normalized(Vec3::Y);
+
+        if transform.translation.length() > RADIUS - 5.0
+            && direction.normalize().dot(transform.translation.normalize()) > -0.5
+        {
+            cm.brake = true;
+            cm.base_speed = 0.0;
+            cm.base_turn_speed = 5.0;
         }
-        transform.rotation = rot * Quat::from_rotation_y(v.turn_speed * time.delta_seconds());
+
+        let acc = (if vel.linvel.length() > cm.base_speed {
+            -1.0
+        } else {
+            1.0
+        }) * 15.0;
+
+        let base_acc = acc - if cm.brake { 30.0 } else { 0.0 };
+
+        fce.force = if base_acc > 0.0 {
+            direction * base_acc
+        } else {
+            acc_dir * base_acc
+        };
+
+        let turn_acc = cm.base_turn_speed * 10.0;
+
+        if vel.angvel.length() > cm.base_turn_speed {
+            fce.torque = -vel.angvel.normalize() * turn_acc.abs();
+        } else {
+            fce.torque = turn_acc * Vec3::Y;
+        }
     }
 }
 
@@ -223,10 +265,12 @@ fn detect_car_collision(
 
                 let car = car_query.get_mut(parent.get());
 
-                let mut rng = rand::thread_rng();
+                // let mut rng = rand::thread_rng();
                 if let Ok(mut car) = car {
-                    car.speed = 0.0;
-                    car.turn_speed = if rng.gen_range(0..1) == 0 { -5.0 } else { 5.0 };
+                    // let direction = transform.rotation.mul_vec3(Vec3::Z);
+
+                    car.base_speed = 0.0;
+                    car.base_turn_speed = 2.0;
                 }
             }
             _ => {
@@ -247,12 +291,12 @@ fn detect_car_collision(
 }
 
 fn if_detect_nothing_go_forward(
-    mut car_query: Query<(&mut CanMove, &Children)>,
+    mut car_query: Query<(&Children, &mut CanMove)>,
     sensor_query: Query<Entity, With<Sensor>>,
     rapier_context: Res<RapierContext>,
 ) {
-    for (mut car, children) in car_query.iter_mut() {
-        if car.speed > 0.0 {
+    for (children, mut car) in car_query.iter_mut() {
+        if car.base_speed > 0.0 {
             continue;
         }
 
@@ -268,8 +312,9 @@ fn if_detect_nothing_go_forward(
             continue;
         }
 
-        car.speed = 15.0;
-        car.turn_speed = -1.0;
+        // let direction = transform.rotation.mul_vec3(Vec3::Z);
+
+        *car = CanMove::default();
     }
 }
 
@@ -287,14 +332,13 @@ fn kill_all_cars_on_r(
 
 fn car_decides_tick(
     mut timer: ResMut<DecisionTimer>,
-    mut query: Query<&mut CanMove>,
+    mut query: Query<(&mut CanMove, &Transform)>,
     time: Res<Time>,
 ) {
     let mut rng = rand::thread_rng();
     if timer.0.tick(time.delta()).just_finished() {
-        for mut car in query.iter_mut() {
-            car.speed = CAR_BASE_SPEED * rng.gen_range(0.5..1.5);
-            car.turn_speed = rng.gen_range(-1.0..1.0);
+        for (mut cm, transform) in query.iter_mut() {
+            // cm = CanMove::default();
         }
     }
 }
