@@ -1,5 +1,6 @@
 use bevy::{gltf::Gltf, prelude::*};
 use bevy_asset_loader::prelude::*;
+use bevy_atmosphere::prelude::*;
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
 use bevy_rapier3d::prelude::*;
 
@@ -24,9 +25,6 @@ struct Following {
 #[derive(Component)]
 struct CanDie;
 
-#[derive(Component)]
-struct Player;
-
 impl Default for Following {
     fn default() -> Self {
         Self {
@@ -45,14 +43,13 @@ fn main() {
         )
         .add_systems(OnEnter(AssetLoaderState::Done), setup)
         // .add_systems(Update, spawn_box.run_if(in_state(AssetLoaderState::Done)))
-        .add_plugins(DefaultPlugins)
+        .add_plugins((DefaultPlugins, AtmospherePlugin))
         .add_plugins(RapierPhysicsPlugin::<NoUserData>::default())
         .add_plugins(RapierDebugRenderPlugin::default())
         .add_plugins(PanOrbitCameraPlugin)
-        .add_systems(Update, (rotate_car, move_car))
+        .add_systems(Update, move_car)
         .add_systems(Update, spawn_car_on_c)
         .add_systems(Update, kill_out_of_bounds)
-        .add_systems(Update, respawn_player_if_not_exists)
         .run();
 }
 
@@ -61,18 +58,23 @@ fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    assets: Res<AssetServer>,
 ) {
     // circular base
-    commands.spawn((
-        PbrBundle {
-            mesh: meshes.add(Cylinder::new(30.0, 0.1)),
-            material: materials.add(Color::WHITE),
-            ..default()
-        },
-        RigidBody::Fixed,
-        Collider::cylinder(0.1, 30.0),
-    ));
+    commands
+        .spawn((
+            PbrBundle {
+                mesh: meshes.add(Cylinder::new(30.0, 0.1)),
+                material: materials.add(Color::WHITE),
+                ..default()
+            },
+            RigidBody::Fixed,
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Collider::cylinder(5.0, 30.0),
+                Transform::from_xyz(0.0, -5.0, 0.0),
+            ));
+        });
 
     commands.spawn((
         Camera3dBundle {
@@ -80,43 +82,44 @@ fn setup(
             ..default()
         },
         PanOrbitCamera::default(),
+        AtmosphereCamera::default(),
     ));
 }
 
-fn rotate_car(
-    keyboard_input: Res<ButtonInput<KeyCode>>,
-    mut query: Query<(&CanDie, &mut Transform)>,
-) {
-    for (_, mut transform) in query.iter_mut() {
-        if keyboard_input.pressed(KeyCode::ArrowRight) {
-            // oneway.facing = Quat::from_rotation_y(-0.1) * oneway.facing;
-            transform.rotation = Quat::from_rotation_y(-0.1) * transform.rotation;
-        }
+// fn rotate_car(
+//     keyboard_input: Res<ButtonInput<KeyCode>>,
+//     mut query: Query<(&CanDie, &mut Transform)>,
+// ) {
+//     for (_, mut transform) in query.iter_mut() {
+//         if keyboard_input.pressed(KeyCode::ArrowRight) {
+//             // oneway.facing = Quat::from_rotation_y(-0.1) * oneway.facing;
+//             transform.rotation = Quat::from_rotation_y(-0.1) * transform.rotation;
+//         }
 
-        if keyboard_input.pressed(KeyCode::ArrowLeft) {
-            // oneway.facing = Quat::from_rotation_y(0.1) * oneway.facing;
-            transform.rotation = Quat::from_rotation_y(0.1) * transform.rotation;
-        }
+//         if keyboard_input.pressed(KeyCode::ArrowLeft) {
+//             // oneway.facing = Quat::from_rotation_y(0.1) * oneway.facing;
+//             transform.rotation = Quat::from_rotation_y(0.1) * transform.rotation;
+//         }
 
-        let cur = transform.rotation;
+//         let cur = transform.rotation;
 
-        if keyboard_input.pressed(KeyCode::ArrowUp) {
-            // oneway.facing = Quat::from_rotation_y(0.1) * oneway.facing;
-            transform.translation += cur * Vec3::new(0.0, 0.0, 0.5);
-        }
+//         if keyboard_input.pressed(KeyCode::ArrowUp) {
+//             // oneway.facing = Quat::from_rotation_y(0.1) * oneway.facing;
+//             transform.translation += cur * Vec3::new(0.0, 0.0, 0.5);
+//         }
 
-        if keyboard_input.pressed(KeyCode::Space) {
-            // oneway.facing = Quat::from_rotation_y(0.1) * oneway.facing;
-            transform.translation += Vec3::new(0.0, 0.1, 0.0);
+//         if keyboard_input.pressed(KeyCode::Space) {
+//             // oneway.facing = Quat::from_rotation_y(0.1) * oneway.facing;
+//             transform.translation += Vec3::new(0.0, 0.1, 0.0);
 
-            // rotate the x and then remove the y component
-            let relative_x = (cur * Vec3::X).reject_from_normalized(Vec3::Y);
+//             // rotate the x and then remove the y component
+//             let relative_x = (cur * Vec3::X).reject_from_normalized(Vec3::Y);
 
-            // rotate the car on the relative x axis
-            transform.rotation = Quat::from_axis_angle(relative_x, -0.1) * transform.rotation;
-        }
-    }
-}
+//             // rotate the car on the relative x axis
+//             transform.rotation = Quat::from_axis_angle(relative_x, -0.1) * transform.rotation;
+//         }
+//     }
+// }
 
 fn spawn_car_on_c(
     keyboard_input: Res<ButtonInput<KeyCode>>,
@@ -124,51 +127,36 @@ fn spawn_car_on_c(
     assets: Res<AssetServer>,
 ) {
     if keyboard_input.just_pressed(KeyCode::KeyC) {
-        spawn_car(commands, assets, false);
+        spawn_car(commands, assets);
     }
 }
 
-fn spawn_car(mut commands: Commands, assets: Res<AssetServer>, as_player: bool) {
-    let mut binding = commands.spawn((
-        SceneBundle {
-            scene: assets.load("cars/taxi.glb#Scene0"),
-            transform: Transform::from_xyz(0.0, 10.0, 0.0),
-            ..default()
-        },
-        RigidBody::Dynamic,
-        CanDie,
-    ));
-
-    let cmd = binding.with_children(|p| {
-        let mut cmd = p.spawn((
-            Collider::cuboid(0.5, 0.5, 1.0),
-            Transform::from_xyz(0.0, 0.5, 0.0),
-            Restitution::coefficient(0.5),
-        ));
-
-        if as_player {
-            cmd.insert(ColliderMassProperties::Density(20.0));
-        } else {
-            cmd.insert(ColliderMassProperties::Density(0.5));
-        }
-
-        p.spawn(PointLightBundle {
-            point_light: PointLight {
-                shadows_enabled: true,
-                radius: 10.0,
-                intensity: 100000.0,
+fn spawn_car(mut commands: Commands, assets: Res<AssetServer>) {
+    commands
+        .spawn((
+            SceneBundle {
+                scene: assets.load("cars/taxi.glb#Scene0"),
+                transform: Transform::from_xyz(0.0, 0.5, -25.0),
                 ..default()
             },
-            transform: Transform::from_xyz(0.0, 0.5, 2.0),
-            ..default()
-        });
-    });
+            RigidBody::Dynamic,
+            CanDie,
+            Following::default(),
+        ))
+        .with_children(|p| {
+            p.spawn((
+                Collider::cuboid(0.5, 0.5, 1.0),
+                Transform::from_xyz(0.0, 0.5, 0.0),
+                Restitution::coefficient(0.2),
+                ColliderMassProperties::Density(0.5),
+            ));
 
-    if as_player {
-        cmd.insert(Player);
-    } else {
-        cmd.insert(Following::default());
-    }
+            p.spawn(SpotLightBundle {
+                transform: Transform::from_xyz(0.0, 1.0, 1.0)
+                    .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
+                ..default()
+            });
+        });
 }
 
 fn move_car(mut query: Query<(&Following, &mut Transform)>, time: Res<Time>) {
@@ -186,15 +174,5 @@ fn kill_out_of_bounds(
         if transform.translation.y < -10.0 {
             commands.entity(entity).despawn_recursive();
         }
-    }
-}
-
-fn respawn_player_if_not_exists(
-    commands: Commands,
-    assets: Res<AssetServer>,
-    query: Query<&Player>,
-) {
-    if query.iter().count() == 0 {
-        spawn_car(commands, assets, true);
     }
 }
