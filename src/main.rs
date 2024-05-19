@@ -12,6 +12,9 @@ enum AssetLoaderState {
     Done,
 }
 
+#[derive(Resource)]
+struct DecisionTimer(Timer);
+
 #[derive(AssetCollection, Resource)]
 struct MyAssets {
     #[asset(path = "cars/taxi.glb")]
@@ -53,9 +56,18 @@ fn main() {
         .add_plugins(RapierPhysicsPlugin::<NoUserData>::default())
         .add_plugins(RapierDebugRenderPlugin::default())
         .add_plugins(PanOrbitCameraPlugin)
+        .insert_resource(DecisionTimer(Timer::from_seconds(
+            1.0,
+            TimerMode::Repeating,
+        )))
         .add_systems(
             Update,
-            (detect_car_collision, move_car, if_detect_nothing_go_forward),
+            (
+                detect_car_collision,
+                move_car,
+                if_detect_nothing_go_forward,
+                car_decides_tick,
+            ),
         )
         .add_systems(Update, spawn_car_on_c)
         .add_systems(Update, kill_out_of_bounds)
@@ -160,7 +172,7 @@ fn spawn_car(mut commands: Commands, assets: Res<AssetServer>, pos: Vec3, rot: Q
                 ActiveEvents::COLLISION_EVENTS,
                 CollisionGroups::new(
                     Group::from_bits(0b0010).unwrap(),
-                    Group::from_bits(0b0001).unwrap(),
+                    Group::from_bits(0b1001).unwrap(),
                 ),
             ));
 
@@ -172,10 +184,15 @@ fn spawn_car(mut commands: Commands, assets: Res<AssetServer>, pos: Vec3, rot: Q
         });
 }
 
-fn move_car(mut query: Query<(&CanMove, &mut Transform)>, time: Res<Time>) {
-    for (v, mut transform) in query.iter_mut() {
+fn move_car(mut query: Query<(&mut CanMove, &mut Transform)>, time: Res<Time>) {
+    for (mut v, mut transform) in query.iter_mut() {
         let rot = transform.rotation;
-        transform.translation += rot * Vec3::Z * v.speed * time.delta_seconds();
+        let planned_pos = transform.translation + rot * Vec3::Z * v.speed * time.delta_seconds();
+        if planned_pos.distance(Vec3::ZERO) < RADIUS {
+            transform.translation = planned_pos;
+        } else {
+            v.turn_speed = 5.0;
+        }
         transform.rotation = rot * Quat::from_rotation_y(v.turn_speed * time.delta_seconds());
     }
 }
@@ -206,9 +223,10 @@ fn detect_car_collision(
 
                 let car = car_query.get_mut(parent.get());
 
+                let mut rng = rand::thread_rng();
                 if let Ok(mut car) = car {
                     car.speed = 0.0;
-                    car.turn_speed = 1.0;
+                    car.turn_speed = if rng.gen_range(0..1) == 0 { -5.0 } else { 5.0 };
                 }
             }
             _ => {
@@ -263,6 +281,20 @@ fn kill_all_cars_on_r(
     if keyboard_input.just_pressed(KeyCode::KeyR) {
         for entity in query.iter() {
             commands.entity(entity).despawn_recursive();
+        }
+    }
+}
+
+fn car_decides_tick(
+    mut timer: ResMut<DecisionTimer>,
+    mut query: Query<&mut CanMove>,
+    time: Res<Time>,
+) {
+    let mut rng = rand::thread_rng();
+    if timer.0.tick(time.delta()).just_finished() {
+        for mut car in query.iter_mut() {
+            car.speed = CAR_BASE_SPEED * rng.gen_range(0.5..1.5);
+            car.turn_speed = rng.gen_range(-1.0..1.0);
         }
     }
 }
