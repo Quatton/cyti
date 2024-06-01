@@ -2,7 +2,10 @@ use bevy::{gltf::Gltf, prelude::*, transform};
 use bevy_asset_loader::prelude::*;
 use bevy_atmosphere::prelude::*;
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin};
-use bevy_rapier3d::{na::base, prelude::*};
+use bevy_rapier3d::{
+    na::{base, ComplexField},
+    prelude::*,
+};
 use rand::prelude::*;
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash, Default, States)]
@@ -59,7 +62,7 @@ fn main() {
         .add_plugins(RapierDebugRenderPlugin::default())
         .add_plugins(PanOrbitCameraPlugin)
         .insert_resource(DecisionTimer(Timer::from_seconds(
-            3.0,
+            10.0,
             TimerMode::Repeating,
         )))
         .add_systems(
@@ -74,6 +77,7 @@ fn main() {
         .add_systems(Update, spawn_car_on_c)
         .add_systems(Update, kill_out_of_bounds)
         .add_systems(Update, kill_all_cars_on_r)
+        // .add_systems(Update, car_decides_tick)
         .run();
 }
 
@@ -177,7 +181,7 @@ fn spawn_car(mut commands: Commands, assets: Res<AssetServer>, pos: Vec3, rot: Q
             ));
 
             p.spawn((
-                Collider::cone(5.0, 1.0),
+                Collider::cone(5.0, 3.0),
                 // rotate the cone so it's facing the same direction as the car
                 Transform::from_xyz(0.0, 0.5, 6.5)
                     .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
@@ -209,29 +213,41 @@ fn move_car(
 
         if transform.translation.length() > RADIUS - 5.0
             && direction.normalize().dot(transform.translation.normalize()) > -0.5
+            && rot.mul_vec3(Vec3::Y).y > 0.1
         {
             cm.brake = true;
             cm.base_speed = 0.0;
-            cm.base_turn_speed = 5.0;
+
+            let turn = if direction.cross(transform.translation).y > 0.0 {
+                -1.0
+            } else {
+                1.0
+            };
+
+            cm.base_turn_speed = 2.0 * turn;
         }
 
         let acc = (if vel.linvel.length() > cm.base_speed {
             -1.0
         } else {
             1.0
-        }) * 15.0;
+        }) * 30.0;
 
         let base_acc = acc - if cm.brake { 30.0 } else { 0.0 };
 
-        fce.force = if base_acc > 0.0 {
+        fce.force = if transform.translation.y < 0.5 {
+            Vec3::new(0.0, fce.force.y, 0.0)
+        } else {
+            fce.force.reject_from(Vec3::Y)
+        } + (if base_acc > 0.0 {
             direction * base_acc
         } else {
             acc_dir * base_acc
-        };
+        });
 
         let turn_acc = cm.base_turn_speed * 10.0;
 
-        if vel.angvel.length() > cm.base_turn_speed {
+        if vel.angvel.length() > cm.base_turn_speed.abs() {
             fce.torque = -vel.angvel.normalize() * turn_acc.abs();
         } else {
             fce.torque = turn_acc * Vec3::Y;
@@ -252,25 +268,54 @@ fn kill_out_of_bounds(
 
 fn detect_car_collision(
     mut collision_events: EventReader<CollisionEvent>,
-    mut parent_query: Query<&Parent>,
-    mut car_query: Query<&mut CanMove>,
+    parent_query: Query<&Parent>,
+    mut car_query: Query<(&mut CanMove, &Transform, &mut ExternalForce), Without<Collider>>,
+    collider_query: Query<&Transform, With<Collider>>,
     sensor_query: Query<&Sensor>,
 ) {
     for event in collision_events.read() {
         match event {
             CollisionEvent::Started(a, b, _) => {
-                let itself = if sensor_query.get(*a).is_ok() { a } else { b };
+                let (itself, other) = if sensor_query.get(*a).is_ok() {
+                    (a, b)
+                } else {
+                    (b, a)
+                };
 
-                let parent = parent_query.get_mut(*itself).unwrap();
+                let parent = parent_query.get(*itself).unwrap();
 
                 let car = car_query.get_mut(parent.get());
+                let other_car = collider_query.get(*other);
 
                 // let mut rng = rand::thread_rng();
-                if let Ok(mut car) = car {
-                    // let direction = transform.rotation.mul_vec3(Vec3::Z);
+                if let Ok((mut car, transform, mut fce)) = car {
+                    let direction = transform
+                        .rotation
+                        .mul_vec3(Vec3::Z)
+                        .reject_from_normalized(Vec3::Y);
 
-                    car.base_speed = 0.0;
-                    car.base_turn_speed = 2.0;
+                    if transform.rotation.mul_vec3(Vec3::Y).y < 0.1 {
+                        return;
+                    }
+
+                    if let Ok(other_transform) = other_car {
+                        let other_direction = other_transform
+                            .rotation
+                            .mul_vec3(Vec3::Z)
+                            .reject_from_normalized(Vec3::Y);
+
+                        // other heading to the right -> turn left
+                        // other heading to the left -> turn right
+
+                        // the more inline, the more turn
+                        let turn_multiplier = other_direction.dot(direction).abs();
+
+                        let turn = other_direction.cross(direction).y.signum();
+
+                        car.base_turn_speed = turn * turn_multiplier * 2.0;
+
+                        car.base_speed = 0.5;
+                    }
                 }
             }
             _ => {
@@ -296,7 +341,7 @@ fn if_detect_nothing_go_forward(
     rapier_context: Res<RapierContext>,
 ) {
     for (children, mut car) in car_query.iter_mut() {
-        if car.base_speed > 0.0 {
+        if car.base_speed > 1.0 {
             continue;
         }
 
@@ -332,13 +377,20 @@ fn kill_all_cars_on_r(
 
 fn car_decides_tick(
     mut timer: ResMut<DecisionTimer>,
-    mut query: Query<(&mut CanMove, &Transform)>,
+    mut query: Query<(&mut CanMove, &Transform, &mut ExternalForce)>,
     time: Res<Time>,
 ) {
     let mut rng = rand::thread_rng();
     if timer.0.tick(time.delta()).just_finished() {
-        for (mut cm, transform) in query.iter_mut() {
-            // cm = CanMove::default();
+        for (mut cm, transform, mut fce) in query.iter_mut() {
+            if rng.gen_bool(0.2) {
+                let direction = transform
+                    .rotation
+                    .mul_vec3(Vec3::Z)
+                    .reject_from_normalized(Vec3::Y);
+                let jump = Vec3::new(0.0, 100.0, 0.0) + direction * 100.0;
+                fce.force += jump;
+            }
         }
     }
 }
